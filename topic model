@@ -1,0 +1,122 @@
+#loading package
+library(topicmodels)
+library(quanteda)
+library(tidyverse)
+library(lubridate)
+library(sysfonts)
+font_add_google("Noto Sans TC", "Noto Sans TC")
+library(showtext)
+showtext_auto()
+library(jiebaR)
+library(tidytext)
+
+#processing the topic modeling
+  
+docvars(dfm_kwong_r, "docname") <- docnames(dfm_kwong_r)
+dfm_trimmed <- dfm_trim(dfm_kwong_r, min_docfreq = 5, min_count = 10)
+dfm_trimmed
+row_sum <- apply(dfm_trimmed , 1, sum)
+dfm_trimmed <- dfm_trimmed[row_sum> 0, ]
+lda_data <- convert(dfm_trimmed, to = "topicmodels")
+lda_data
+
+install.packages("ldatuning")
+
+library(ldatuning)
+
+ldatuning.result <- FindTopicsNumber(
+  lda_data,
+  topics = seq(from = 10, to = 50, by = 10),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010","Deveaud2014"), # There are 4 possible metrics: Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"
+  method = "Gibbs",
+  control = list(seed = 4321),
+  verbose = TRUE
+)
+
+FindTopicsNumber_plot(ldatuning.result)
+
+library(doParallel)
+library(dplyr)
+library(reshape2)
+library(tidyr)
+library(ggplot2)
+
+
+cluster <- makeCluster(detectCores(logical = TRUE)-1, outfile = "Log.txt")
+
+registerDoParallel(cluster)
+clusterEvalQ(cluster, {
+  library(topicmodels)
+})
+
+
+n <- nrow(lda_data)
+burnin <- 1000
+iter <- 1000
+keep <- 50
+folds <- 5
+splitfolds <- sample(1:folds, n, replace = TRUE)
+candidate_k <- c(10, 20, 30, 40, 50)
+
+
+clusterExport(cluster, c("lda_data", "burnin", "iter", "keep", "splitfolds", "folds", "candidate_k"))
+
+
+
+system.time({
+  results <- foreach(j = 1:length(candidate_k), .combine = rbind) %dopar%{
+    k <- candidate_k[j]
+    results_1k <- matrix(0, nrow = folds, ncol = 2)
+    colnames(results_1k) <- c("k", "perplexity")
+    for(i in 1:folds){
+      train_set <- lda_data[splitfolds != i , ]
+      valid_set <- lda_data[splitfolds == i, ]
+      
+      fitted <- LDA(train_set, k = k, method = "Gibbs",
+                    control = list(burnin = burnin, iter = iter, keep = keep) )
+      results_1k[i,] <- c(k, perplexity(fitted, newdata = valid_set))
+    }
+    print(k)
+    return(results_1k)
+  }
+})
+
+stopCluster(cluster)
+
+results_df <- as.data.frame(results)
+results_df$istest <- "test"
+avg_perplexity <- results_df %>% group_by(k) %>% summarise(perplexity = mean(perplexity))
+avg_perplexity$istest <- "avg"
+plot_df <- rbind(results_df, avg_perplexity)
+
+ggplot(plot_df, aes(x = k, y = perplexity, group = istest)) +
+  geom_point(aes(colour = factor(istest))) +
+  geom_line(data = subset(plot_df, istest %in% "avg"), color = "red") +
+  ggtitle("5-fold Cross-validation of Topic Modelling") +
+  labs(x = "Candidate k", y = "Perplexity") +
+  scale_x_discrete(limits = candidate_k) +
+  scale_color_discrete(name="Test\\Average",
+                       breaks=c("test", "avg"),
+                       labels=c("Test", "Average")) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+lda_model <- LDA(lda_data, 20, method="Gibbs")  
+get_terms(lda_model, k=20)
+library(tidytext)
+library(tidyr)
+topics <- tidy(lda_model, matrix = "beta")
+
+#output of topic model
+
+topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+
